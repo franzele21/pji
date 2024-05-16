@@ -179,3 +179,4 @@ pyrightconfig.json
 *.zip
 *.bag
 *.mp4
+*.csv
