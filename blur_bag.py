@@ -1,5 +1,29 @@
 import argparse
 
+if "__main__" == __name__:
+    parser = argparse.ArgumentParser(description="Used to blur things from a bag file")
+    parser.add_argument("bag_file_path",        help="Path to the .bag file",       type=str)
+    parser.add_argument("yolo_model_path",      help="Path to the Yolov8 model",    type=str)
+    parser.add_argument("-o", "--output_file",  help="Path to the output mp4 file", type=str)
+    parser.add_argument("--frame_rate",         help="Frame sampling rate",         type=int)
+    parser.add_argument("--black_box",          help="Replace the blur with a black box", action="store_true")
+    parser.add_argument("--keep_orig_mp4",      help="Keep the original mp4 of the bag video", action="store_true")
+    parser.add_argument("-v", "--verbose",      help="Program will print its progress", action="store_true")
+    args = parser.parse_args()
+
+from ultralytics import YOLO
+import ultralytics
+import cv2
+import math
+from tqdm import tqdm
+import os
+import gc
+import numpy as np
+import uuid
+
+import bagpy as bg
+from cv_bridge import CvBridge
+
 def blur_box(frame: np.ndarray, 
              box: ultralytics.engine.results.Boxes, 
              black_box: bool=False, 
@@ -289,7 +313,7 @@ def bag_to_mp4(bag_file, output_file, topic="/camera/color/image_raw"):
     -----
     - The input `bag_file` should be a valid path to a ROS bag file.
     - The `topic` parameter specifies the ROS topic containing the image messages.
-    - Ensure that the `bagpy` and `cv_bridge` library is installed and imported before using this function.
+    - Ensure that the `bagpy` and `cv_bridge ` library is installed and imported before using this function.
     """
     bag_data = bg.bagreader(bag_file)
     bridge = CvBridge()
@@ -315,29 +339,6 @@ def bag_to_mp4(bag_file, output_file, topic="/camera/color/image_raw"):
     video.release()
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Used to blur things from a bag file")
-    parser.add_argument("bag_file_path",        help="Path to the .bag file",       type=str)
-    parser.add_argument("yolo_model_path",      help="Path to the Yolov8 model",    type=str)
-    parser.add_argument("-o", "--output_file",  help="Path to the output mp4 file", type=str)
-    parser.add_argument("--frame_rate",         help="Frame sampling rate",         type=int)
-    parser.add_argument("--black_box",          help="Replace the blur with a black box", action="store_true")
-    parser.add_argument("--keep_orig_mp4",      help="Keep the original mp4 of the bag video", action="store_true")
-    parser.add_argument("-v", "--verbose",      help="Program will print its progress", action="store_true")
-    args = parser.parse_args()
-
-    from ultralytics import YOLO
-    import ultralytics
-    import cv2
-    import math
-    from tqdm import tqdm
-    import os
-    import gc
-    import numpy as np
-    import uuid
-
-    import bagpy as bg
-    from cv_bridge import CvBridge
-
     model = YOLO(args.yolo_model_path)
     bag_file = args.bag_file_path
 
