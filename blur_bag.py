@@ -194,7 +194,7 @@ def tmp_video(orig_video: str,
     del i
     del img
     del success
-    vidcap.release
+    vidcap.release()
     video.release()
     gc.collect()
 
