@@ -25,6 +25,71 @@ import bagpy as bg
 from cv_bridge import CvBridge
 
 def fill_list(box_list: list, frame_rate:int=1, box_difference:int=5):
+    """
+    Modifies a list of lists (`box_list`) by filling in gaps and ensuring continuity between frames
+    based on spatial proximity of bounding boxes.
+
+    This function iterates through each list of boxes (representing frames) and checks for continuity 
+    of each box between consecutive frames. If a box in a previous frame does not have a close match 
+    in the current frame but has one in subsequent frames (within a specified `frame_rate`), a mean 
+    box is created to bridge the gap.
+
+    It will also add a box at before the first occurance of a box, for a more smooth blurring
+
+    Parameters
+    ----------
+    box_list : list of list of list of float
+        A list where each element is a list representing a frame of bounding boxes, and each bounding 
+        box is a list of floats representing its coordinates.
+    frame_rate : int, optional
+        The number of frames to look ahead for matching a box from the previous frame, default is 1.
+    box_difference : int, optional
+        The allowed difference between the coordinates of boxes for them to be considered close, 
+        default is 5.
+
+    Returns
+    -------
+    list of list of list of float
+        The modified `box_list` with added boxes to ensure continuity between frames.
+
+    Examples
+    --------
+    >>> boxes = [
+            [
+                [10, 10, 20, 20],
+                [20, 20, 40, 40]
+            ],
+            [
+                [100, 100, 150, 150]
+            ],
+            [
+                [20, 20, 40, 40]
+            ],
+            [
+                [15, 15, 25, 25]
+            ]
+        ]
+    >>> fill_list(boxes, frame_rate=3)
+    [
+        [
+            [10, 10, 20, 20], 
+            [20, 20, 40, 40], 
+            [100, 100, 150, 150]        # was added 
+        ],
+        [
+            [100, 100, 150, 150], 
+            [12.5, 12.5, 22.5, 22.5],   # was added
+            [20.0, 20.0, 40.0, 40.0]    # was added
+        ],
+        [
+            [20, 20, 40, 40], 
+            [13.75, 13.75, 23.75, 23.75]    # was added
+        ],
+        [
+            [15, 15, 25, 25]
+        ]
+    ]
+    """
     for i in range(1, len(box_list)-1):
         # on regarde les boxes de la frame précédente
         for last_boxes in box_list[i-1]:
