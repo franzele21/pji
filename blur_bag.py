@@ -12,7 +12,6 @@ if "__main__" == __name__:
     args = parser.parse_args()
 
 from ultralytics import YOLO
-import ultralytics
 import cv2
 import math
 from tqdm import tqdm
