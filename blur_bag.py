@@ -24,10 +24,43 @@ import uuid
 import bagpy as bg
 from cv_bridge import CvBridge
 
+from pprint import pprint
+
+def fill_list(box_list: list, frame_rate:int=1, box_difference:int=5):
+    for i in range(1, len(box_list)-1):
+        # on regarde les boxes de la frame précédente
+        for last_boxes in box_list[i-1]:
+            correspondance_now = False
+            for present_boxe in box_list[i]:
+                # on trouve une frame ressemblante dans la frame actuelle
+                if np.isclose(last_boxes, present_boxe, atol=box_difference).all():
+                    correspondance_now = True
+            # si on trouve, alors on s'arrête là (pas besoin de créer de boxe)
+            if correspondance_now:
+                continue
+            
+            # on regarde si les frames d'après ressemble à une box de la frame précédente
+            correspondance_after = False
+            for j in range(frame_rate):
+                if len(box_list) > i+j+1:
+                    for next_boxe in box_list[i+j+1]:
+                        # on trouve une frame ressemblante
+                        if np.isclose(last_boxes, next_boxe, atol=box_difference).all():
+                            correspondance_after = True
+                            break
+                    if correspondance_after:
+                        break
+            
+            # si on trouve une frame ressemblante, alors on créer une approximation entre la
+            # boxe de la frame précédente et suivante
+            if correspondance_after:
+                box_list[i].append(np.mean([last_boxes, next_boxe], axis=0).tolist())
+                
+    return box_list
+
 def blur_box(frame: np.ndarray, 
-             box: ultralytics.engine.results.Boxes, 
-             black_box: bool=False, 
-             min_conf: float=0.3):
+             box: list, 
+             black_box: bool=False):
     """
     Apply a blur or black box to a specified region of an image if the confidence level is above a threshold.
 
@@ -58,17 +91,16 @@ def blur_box(frame: np.ndarray,
     - If `black_box` is set to True, the region within the bounding box will be replaced with black pixels (faster than blurring).
     - The Gaussian blur applied uses a kernel size of (51, 51) with a standard deviation of 0.
     """
-    if math.ceil((box.conf[0]*100))/100 > min_conf:
-        x1, y1, x2, y2 = box.xyxy[0]
-        x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
-        h, w = y2-y1, x2-x1
+    x1, y1, x2, y2 = box
+    x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
+    h, w = y2-y1, x2-x1
 
-        if black_box:
-            blur = np.zeros((h, w, 3))
-        else:
-            ROI = frame[y1:y1+h, x1:x1+w]
-            blur = cv2.GaussianBlur(ROI, (51,51), 0) 
-        frame[y1:y1+h, x1:x1+w] = blur
+    if black_box:
+        blur = np.zeros((h, w, 3))
+    else:
+        ROI = frame[y1:y1+h, x1:x1+w]
+        blur = cv2.GaussianBlur(ROI, (51,51), 0) 
+    frame[y1:y1+h, x1:x1+w] = blur
     return frame
 
 def read_video_file(video_path: str):
@@ -233,19 +265,25 @@ def blur_video(model,
     - The `frame_verif_rate` determines how often the object detection model is applied to video frames.
     - If `black_box` is set to True, black boxes will be applied to detected objects instead of blurring them.
     """
+    min_conf = 0.3
+
     if verbose: print("Création vidéo temporaire")
     tmp_video_name = f"{uuid.uuid4().hex}.mp4"
     tmp_video(video_path, tmp_video_name, frame_verif_rate)
     gc.collect()
 
-    if verbose: print("Floutage")
+    if verbose: print("Détection")
     vidcap_s, frame_number_s, _, _ = read_video_file(tmp_video_name)
     vidcap_o, _, fps_o, frame_size_o = read_video_file(video_path)
-    video = create_video_file(output_path, fps_o, frame_size_o)
     success_s, img_s = vidcap_s.read()
     assert success_s, "Error while loading the temp video"
 
-    for i in tqdm(range(frame_number_s)):
+    boxes_list = []
+    if verbose:
+        loop_range = tqdm(range(frame_number_s))
+    else:
+        loop_range = range(frame_number_s)
+    for i in loop_range:
         results_s = model(img_s, verbose=False, stream=True)
         to_blur = len(next(results_s).boxes.conf) > 0
         del results_s ; gc.collect()
@@ -253,36 +291,61 @@ def blur_video(model,
         if i == 0:
             for j in range(math.ceil(frame_verif_rate/2)):
                 success_o, img_o = vidcap_o.read()
+                boxes_list.append([])
                 if to_blur:
                     boxes = next(model(img_o, verbose=False, stream=True)).boxes
                     for box in boxes:
-                        img_o = blur_box(img_o, box, black_box)
-                video.write(img_o)
+                        if math.ceil((box.conf[0]*100))/100 > min_conf:
+                            boxes_list[-1].append(box.xyxy[0].tolist())
         # autre frame
         else:
             for j in range(frame_verif_rate):
                 success_o, img_o = vidcap_o.read()
+                boxes_list.append([])
                 if to_blur:
                     boxes = next(model(img_o, verbose=False, stream=True)).boxes
                     for box in boxes:
-                        img_o = blur_box(img_o, box, black_box)
-                video.write(img_o)
+                        if math.ceil((box.conf[0]*100))/100 > min_conf:
+                            boxes_list[-1].append(box.xyxy[0].tolist())
             # dernières frames
             if i+1 == frame_number_s:
                 success_o, img_o = vidcap_o.read()
                 while success_o:
-                    video.write(img_o)
+                    boxes_list.append([])
                     if to_blur:
                         boxes = next(model(img_o, verbose=False, stream=True)).boxes
                         for box in boxes:
-                            img_o = blur_box(img_o, box, black_box)
+                            if math.ceil((box.conf[0]*100))/100 > min_conf:
+                                boxes_list[-1].append(box.xyxy[0].tolist())
                     success_o, img_o = vidcap_o.read()
 
         success_s, img_s= vidcap_s.read()
 
     vidcap_s.release()
     vidcap_o.release()
+    del boxes_list[-1]
+
+    if verbose: print("Ajout de boxes")
+    box_difference = max(frame_size_o)//20      # on prends 5% de la plus grosse dimensions
+    boxes_list = fill_list(boxes_list, frame_rate=frame_verif_rate, box_difference=box_difference)
+
+    if verbose: print("Floutage")
+    vidcap_o, _, fps_o, frame_size_o = read_video_file(video_path)
+    video = create_video_file(output_path, fps_o, frame_size_o)
+    if verbose:
+        loop_range = tqdm(boxes_list)
+    else:
+        loop_range = boxes_list
+    for boxes in loop_range:
+        success_o, img_o = vidcap_o.read()
+        if len(boxes) > 0:
+            for box in boxes:
+                img_o = blur_box(img_o, box, black_box)
+        video.write(img_o)
+
     video.release()
+    vidcap_o.release()
+
     if verbose: print("Suppression vidéo temporaire")
     os.remove(tmp_video_name)
 
@@ -352,4 +415,3 @@ if __name__ == "__main__":
                verbose=args.verbose)
     if not args.keep_orig_mp4:
         os.remove(mp4_tmp_file_name)
-    
