@@ -24,8 +24,6 @@ import uuid
 import bagpy as bg
 from cv_bridge import CvBridge
 
-from pprint import pprint
-
 def fill_list(box_list: list, frame_rate:int=1, box_difference:int=5):
     for i in range(1, len(box_list)-1):
         # on regarde les boxes de la frame précédente
@@ -55,7 +53,16 @@ def fill_list(box_list: list, frame_rate:int=1, box_difference:int=5):
             # boxe de la frame précédente et suivante
             if correspondance_after:
                 box_list[i].append(np.mean([last_boxes, next_boxe], axis=0).tolist())
-                
+
+        # on rajoute des boxes aux frames précédentes
+        for present_boxe in box_list[i]:
+            correspondance = False
+            for last_boxe in box_list[i-1]:
+                if np.isclose(last_boxe, present_boxe, atol=box_difference).all():
+                    correspondance = True
+            if not correspondance:
+                box_list[i-1].append(present_boxe) 
+
     return box_list
 
 def blur_box(frame: np.ndarray, 
