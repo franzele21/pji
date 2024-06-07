@@ -1,14 +1,17 @@
 import argparse
 
 if "__main__" == __name__:
-    parser = argparse.ArgumentParser(description="Used to blur things from a bag file")
+    parser = argparse.ArgumentParser(description="Used to blur the video from a bag file")
     parser.add_argument("bag_file_path",        help="Path to the .bag file",       type=str)
     parser.add_argument("yolo_model_path",      help="Path to the Yolov8 model",    type=str)
-    parser.add_argument("-o", "--output_file",  help="Path to the output mp4 file", type=str)
+    parser.add_argument("bag_version",          help="Version of the bagfile (either 1 or 2)",  type=int)
+    parser.add_argument("-o", "--output_file",  help="Path to the output bag file", type=str)
     parser.add_argument("--frame_rate",         help="Frame sampling rate",         type=int)
+    parser.add_argument("--topic",              help="Topic where the video is loated",     type=str)
     parser.add_argument("--black_box",          help="Replace the blur with a black box", action="store_true")
-    parser.add_argument("--keep_orig_mp4",      help="Keep the original mp4 of the bag video", action="store_true")
-    parser.add_argument("-v", "--verbose",      help="Program will print its progress", action="store_true")
+    parser.add_argument("--orig_mp4",           help="Make a mp4 video of the original bag video", action="store_true")
+    parser.add_argument("--new_mp4",            help="Make a mp4 video of the new bag video", action="store_true")
+    parser.add_argument("-v", "--verbose",      help="Program will print its progress", action="store_true")    # refaire
     args = parser.parse_args()
 
 from ultralytics import YOLO
@@ -20,8 +23,9 @@ import gc
 import numpy as np
 import uuid
 
-import bagpy as bg
+import rosbag
 from cv_bridge import CvBridge
+import bagpy as bg
 
 def fill_list(box_list: list, frame_rate:int=1, box_difference:int=5):
     """
@@ -174,46 +178,6 @@ def blur_box(frame: np.ndarray,
     frame[y1:y1+h, x1:x1+w] = blur
     return frame
 
-def read_video_file(video_path: str):
-    """
-    Open a video file and retrieve its properties.
-
-    Parameters
-    ----------
-    video_path : str
-        The path to the video file to be read.
-
-    Returns
-    -------
-    vidcap : cv2.VideoCapture
-        The VideoCapture object for the video file.
-    frame_count : int
-        The total number of frames in the video.
-    fps : float
-        The frames per second (FPS) of the video.
-    frame_size : tuple of int
-        A tuple representing the width and height of the video frames in pixels.
-
-    Examples
-    --------
-    >>> vidcap, frame_count, fps, frame_size = read_video_file('example_video.mp4')
-    >>> print(f"Total frames: {frame_count}")
-    Total frames: 240
-    >>> print(f"FPS: {fps}")
-    FPS: 30.0
-    >>> print(f"Frame size: {frame_size}")
-    Frame size: (1920, 1080)
-
-    Notes
-    -----
-    - The returned `vidcap` object can be used to read frames from the video using methods like `vidcap.read()`.
-    """
-    vidcap = cv2.VideoCapture(video_path)
-    return vidcap, \
-            int(vidcap.get(cv2.CAP_PROP_FRAME_COUNT)), \
-            vidcap.get(cv2.CAP_PROP_FPS), \
-            (int(vidcap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(vidcap.get(cv2.CAP_PROP_FRAME_HEIGHT)))
-
 def create_video_file(output_path: str,
                       fps: float, 
                       frame_size: tuple[int, int]):
@@ -253,216 +217,174 @@ def create_video_file(output_path: str,
                         frameSize=frame_size)
     return video
 
-def tmp_video(orig_video: str, 
-              output_video: str, 
-              frame_rate: str):
+def blur_ros1(model, 
+              input_path: str, 
+              output_path: str,
+              img_topic: str,
+              frame_verif_rate: int=5,
+              black_box: bool=False,
+              verbose: bool=False) -> None:
     """
-    Create a temporary video by sampling frames from an original video at a specified frame rate.
-
-    Parameters
-    ----------
-    orig_video : str
-        The path to the original video file.
-    output_video : str
-        The path where the output video file will be saved.
-    frame_rate : int
-        The interval of frames to sample. For example, a `frame_rate` of 2 will sample every second frame.
-
-    Returns
-    -------
-    None
-
-    Examples
-    --------
-    >>> tmp_video('input_video.mp4', 'output_video.mp4', 10)
-    >>> # This will create an output video that includes every 10th frame from the input video.
-
-    Notes
-    -----
-    - The input `orig_video` should be a valid path to an existing video file.
-    - The `frame_rate` should be a positive integer representing the frame sampling interval.
-    """
-    vidcap, _, fps, frame_size = read_video_file(orig_video)
-    video = create_video_file(output_video, fps, frame_size)
-    success, img = vidcap.read()
-    i=0
-    while success:
-        if i%frame_rate == 0:
-            video.write(img)
-        i+=1
-        success, img = vidcap.read()
-    # on prends la dernière frame
-    if (i-1)%frame_rate != 0:
-        video.write(img)
-    del i
-    del img
-    del success
-    vidcap.release()
-    video.release()
-    gc.collect()
-
-def blur_video(model, 
-               video_path: str, 
-               output_path: str,
-               frame_verif_rate: int=5, 
-               black_box: bool=False,
-               verbose: bool=False):
-    """
-    Apply blur or black boxes to specified objects in a video based on a detection model.
+    Processes an input ROS bag file to blur areas in images based on
+    model predictions, and saves the processed images to a new output
+    ROS bag file.
 
     Parameters
     ----------
     model : object
-        The object detection model used to detect objects in the video frames.
-    video_path : str
-        The path to the input video file.
-    output_path : str
-        The path where the output video file with blurred or black boxed objects will be saved.
+        An object representing a detection model. This model must have a
+        callable method model(image, stream=True, verbose=False) that
+        returns an object with a 'boxes' attribute. Each 'box' contains
+        bounding box information and confidence scores.
+    input_path : str
+        File path to the input ROS bag file containing images to process.
+    output-path : str
+        File path where the output ROS bag file with blurred images will
+        be saved.
+    img_topic : str
+        Topic name in the ROS bag file that contains the images to
+        process.
     frame_verif_rate : int, optional
-        The interval of frames at which the object detection model is applied. Default is 5.
+        Number of frames over which an intermediate verification is
+        performed to decide if blurring should occur. Default is 5.
     black_box : bool, optional
-        If True, black boxes are applied to detected objects instead of blurring. Default is False.
+        If True, uses a solid black box for blurring. Otherwise, a
+        standard blurring filter is applied. Default is False.
     verbose : bool, optional
-        If True, prints progress and status messages. Default is False.
-
-    Returns
-    -------
-    None
+        If True, prints additional information about processing steps.
+        Default is False.
 
     Notes
     -----
-    - The input `model` should be an object detection model capable of detecting objects in video frames.
-    - The `video_path` parameter should be a valid path to an existing video file.
-    - The `frame_verif_rate` determines how often the object detection model is applied to video frames.
-    - If `black_box` is set to True, black boxes will be applied to detected objects instead of blurring them.
+    The function iterates over messages in the input ROS bag file. When
+    image messages are found under the specified `img_topic`, they are
+    processed in batches defined by `frame_verif_rate` rate. For each batch,
+    the central image is used for detection, and if there is any detections
+    the images in the batch will be analysed by the model and possibly be 
+    blurred.
+    If `verbose` is True, function will output messages indicating
+    processing progress and final completion.
     """
-    min_conf = 0.3
+    min_conf = None             # Initialized to none but will evolve 
+    bridge = CvBridge()         # Used to transform ROS images to CV2 
+                                # and vice versa
 
-    if verbose: print("Création vidéo temporaire")
-    tmp_video_name = f"{uuid.uuid4().hex}.mp4"
-    tmp_video(video_path, tmp_video_name, frame_verif_rate)
-    gc.collect()
+    # creating the output baggile
+    with rosbag.Bag(output_path, 'w') as outbag:
+        last_imgs = []          # Will contain the bath of size `frame_verif_rate`
+        boxes_list = []         # Will contain the boxes of the reconnized elements
+        begin = True            # Used to know if it is the beginning of the process
+        full_batch = False      # Will be true when the batch is full
 
-    if verbose: print("Détection")
-    vidcap_s, frame_number_s, _, _ = read_video_file(tmp_video_name)
-    vidcap_o, _, fps_o, frame_size_o = read_video_file(video_path)
-    success_s, img_s = vidcap_s.read()
-    assert success_s, "Error while loading the temp video"
+        # We iterate through all messages in the input bagfile
+        for topic, msg, t in tqdm(rosbag.Bag(input_path).read_messages()):
+            if topic == img_topic:
+                img_msg = msg       # Keep information about the image
 
-    boxes_list = []
-    if verbose:
-        loop_range = tqdm(range(frame_number_s))
-    else:
-        loop_range = range(frame_number_s)
-    for i in loop_range:
-        results_s = model(img_s, verbose=False, stream=True)
-        to_blur = len(next(results_s).boxes.conf) > 0
-        del results_s ; gc.collect()
-        # première frame
-        if i == 0:
-            for j in range(math.ceil(frame_verif_rate/2)):
-                success_o, img_o = vidcap_o.read()
+                # Decode from a ROS image message to a CV2 image
+                img = bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8").copy()
+                last_imgs.append(img)   # Add the image to the batch
+
+                # If it is the first frames and the batch is half full
+                if begin and len(last_imgs) == math.ceil(frame_verif_rate/2):
+                    begin = False
+                    full_batch = True
+                    idx_img = 0         # The verification frame is the first frame
+                # If the batch is full (and it isn't the first frames)
+                elif len(last_imgs) == frame_verif_rate:
+                    full_batch = True
+                    # The verifcation frame is the middle one of the batch
+                    idx_img = math.ceil(frame_verif_rate/2)-1
+
+                if full_batch:
+                    full_batch = False
+
+                    # We check if something were detected in the 
+                    # verification frame 
+                    boxes = next(model(last_imgs[idx_img], stream=True, verbose=False)).boxes
+                    to_blur = len(boxes) > 0
+
+                    # We iterate through the frames of the batch
+                    for img in last_imgs:
+                        # We first say that there is no detection in 
+                        # this frame
+                        boxes_list.append([])
+
+                        # If the verification frame had a detection we 
+                        # launch the detection for the frames of the batch
+                        if to_blur: 
+                            boxes = next(model(img, stream=True, verbose=False)).boxes
+
+                            # If there was a detection in the frame, we 
+                            # modify the thrust threeshold 
+                            if len(boxes.conf) > 0:
+                                if isinstance(min_conf, type(None)):
+                                    min_conf = boxes.conf.mean() * 0.7
+                                else:
+                                    min_conf = (min_conf + boxes.conf.mean())/2 * 0.7
+                            
+                            # For all detections, we add those boxes 
+                            # to the boxes list
+                            for box in boxes:
+                                if box.conf[0] > min_conf:
+                                    boxes_list[-1].append(box.xyxy[0].tolist())
+                    
+                    # Empty the batch
+                    last_imgs = []
+            else:
+                # We write the messages of the other topics
+                outbag.write(topic, msg, msg.header.stamp if msg._has_header else t)
+
+        # If there is still some last frames in the batch, we make the 
+        # same process as before, but the verification frame is the last frame
+        if len(last_imgs) > 0:
+            boxes = next(model(last_imgs[-1], stream=True, verbose=False)).boxes
+            to_blur = len(boxes) > 0
+            for img in last_imgs:
                 boxes_list.append([])
                 if to_blur:
-                    boxes = next(model(img_o, verbose=False, stream=True)).boxes
+                    boxes = next(model(img, stream=True, verbose=False)).boxes 
                     for box in boxes:
-                        if math.ceil((box.conf[0]*100))/100 > min_conf:
-                            boxes_list[-1].append(box.xyxy[0].tolist())
-        # autre frame
-        else:
-            for j in range(frame_verif_rate):
-                success_o, img_o = vidcap_o.read()
-                boxes_list.append([])
-                if to_blur:
-                    boxes = next(model(img_o, verbose=False, stream=True)).boxes
-                    for box in boxes:
-                        if math.ceil((box.conf[0]*100))/100 > min_conf:
-                            boxes_list[-1].append(box.xyxy[0].tolist())
-            # dernières frames
-            if i+1 == frame_number_s:
-                success_o, img_o = vidcap_o.read()
-                while success_o:
-                    boxes_list.append([])
-                    if to_blur:
-                        boxes = next(model(img_o, verbose=False, stream=True)).boxes
-                        for box in boxes:
-                            if math.ceil((box.conf[0]*100))/100 > min_conf:
-                                boxes_list[-1].append(box.xyxy[0].tolist())
-                    success_o, img_o = vidcap_o.read()
+                        boxes_list[-1].append(box.xyxy[0].tolist())
+        
+        # This function adds boxes to counter flickering of the boxes, 
+        # and add boxes before the prediction 
+        boxes_list = fill_list(boxes_list, frame_verif_rate*2, math.ceil(math.sqrt(max(img_msg.width, img_msg.height)))*2)
 
-        success_s, img_s= vidcap_s.read()
+        # Here we apply the blur to the images and we write it in 
+        # the output bagfile
+        idx_boxes = 0               # Index of the current box
+        for topic, msg, t in tqdm(rosbag.Bag(input_path).read_messages()):
+            if topic == img_topic:
+                img = bridge.imgmsg_to_cv2(msg).copy()      # Extract image
 
-    vidcap_s.release()
-    vidcap_o.release()
-    del boxes_list[-1]
+                # Apply all the blut boxes to the frame
+                for box in boxes_list[idx_boxes]:
+                    img = blur_box(img, box, black_box)
+                
+                # Write the frame in the bagfile
+                image_message = bridge.cv2_to_imgmsg(img, encoding="rgb8")
+                outbag.write(topic, image_message, msg.header.stamp)
 
-    if verbose: print("Ajout de boxes")
-    box_difference = max(frame_size_o)//20      # on prends 5% de la plus grosse dimensions
-    boxes_list = fill_list(boxes_list, frame_rate=frame_verif_rate, box_difference=box_difference)
-
-    if verbose: print("Floutage")
-    vidcap_o, _, fps_o, frame_size_o = read_video_file(video_path)
-    video = create_video_file(output_path, fps_o, frame_size_o)
-    if verbose:
-        loop_range = tqdm(boxes_list)
-    else:
-        loop_range = boxes_list
-    for boxes in loop_range:
-        success_o, img_o = vidcap_o.read()
-        if len(boxes) > 0:
-            for box in boxes:
-                img_o = blur_box(img_o, box, black_box)
-        video.write(img_o)
-
-    video.release()
-    vidcap_o.release()
-
-    if verbose: print("Suppression vidéo temporaire")
-    os.remove(tmp_video_name)
+                # Go to the next frame
+                idx_boxes += 1
 
     if verbose: print("========= FIN =========")
 
-def bag_to_mp4(bag_file, output_file, topic="/camera/color/image_raw"):
-    """
-    Convert a ROS1 bag file containing image messages to an MP4 video file.
-
-    Parameters
-    ----------
-    bag_file : str
-        The path to the ROS1 bag file.
-    output_file : str
-        The path where the output MP4 video file will be saved.
-    topic : str, optional
-        The topic containing the image messages in the ROS bag file. Default is "/camera/color/image_raw".
-
-    Returns
-    -------
-    None
-
-    Examples
-    --------
-    >>> bag_to_mp4('example.bag', 'output_video.mp4', topic="/camera/depth/image_raw")
-
-    Notes
-    -----
-    - The input `bag_file` should be a valid path to a ROS bag file.
-    - The `topic` parameter specifies the ROS topic containing the image messages.
-    - Ensure that the `bagpy` and `cv_bridge ` library is installed and imported before using this function.
-    """
-    bag_data = bg.bagreader(bag_file)
+def save_ros1_mp4(bagfile, topic="/camera/color/image_raw"):
     bridge = CvBridge()
+    bag_data = bg.bagreader(bagfile)
+
     images = bag_data.reader.read_messages(topic)
 
-    fps = bag_data.topic_table[bag_data.topic_table["Topics"] == "/camera/color/image_raw"]["Frequency"].item()
-
+    fps = bag_data.topic_table[bag_data.topic_table["Topics"] == topic]["Frequency"].item()
     frame = next(images).message
 
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    video = cv2.VideoWriter(filename=output_file, 
-                        fourcc=fourcc, 
-                        fps=fps, 
-                        frameSize=(frame.width, frame.height))
-    
+    video = cv2.VideoWriter(filename=f"{bagfile}.mp4", 
+                            fourcc=fourcc, 
+                            fps=fps, 
+                            frameSize=(frame.width, frame.height))
     while True:
         try:
             video.write(bridge.imgmsg_to_cv2(frame, desired_encoding="bgr8"))
@@ -470,19 +392,32 @@ def bag_to_mp4(bag_file, output_file, topic="/camera/color/image_raw"):
         except StopIteration:
             break
 
-    video.release()
 
 if __name__ == "__main__":
     model = YOLO(args.yolo_model_path)
     bag_file = args.bag_file_path
 
-    mp4_tmp_file_name = f"{uuid.uuid4().hex}.mp4"
-    bag_to_mp4(bag_file, mp4_tmp_file_name)
-    
-    blur_video(model, mp4_tmp_file_name, 
-               "output.mp4" if isinstance(args.output_file, type(None)) else args.output_file, 
-               frame_verif_rate=5 if isinstance(args.frame_rate, type(None)) else args.frame_rate, 
-               black_box=args.black_box, 
-               verbose=args.verbose)
-    if not args.keep_orig_mp4:
-        os.remove(mp4_tmp_file_name)
+    # mp4_tmp_file_name = f{uuid.uuid4().hex}.mp4"
+    output_file = "output.bag" if isinstance(args.output_file, type(None)) else args.output_file
+    if ".bag" not in output_file: 
+        output_file += ".bag"
+    match args.bag_version:
+        case 1:
+            topic = "/camera/color/image_raw" if isinstance(args.topic, type(None)) else args.topic
+            blur_ros1(model, bag_file, 
+                    output_file, 
+                    frame_verif_rate=5 if isinstance(args.frame_rate, type(None)) else args.frame_rate, 
+                    topic=topic,
+                    black_box=args.black_box, 
+                    verbose=args.verbose)
+            if args.new_mp4:
+                save_ros1_mp4(output_file, topic)
+            if args.orig_mp4:
+                save_ros1_mp4(bag_file, topic)
+
+        case 2:
+            print("not implemented")
+        case _:
+            print("Wrong version (either 1 or 2)")
+
+
