@@ -276,8 +276,16 @@ def blur_ros1(model,
         begin = True            # Used to know if it is the beginning of the process
         full_batch = False      # Will be true when the batch is full
 
+        if verbose: print(f"Number of messages: {rosbag.Bag(input_path).get_message_count()}")
+        if verbose:
+            input_bag_messages = tqdm(rosbag.Bag(input_path).read_messages())
+        else:
+            input_bag_messages = rosbag.Bag(input_path).read_messages()
+
+        if verbose: print("Extracting the boxes")
+
         # We iterate through all messages in the input bagfile
-        for topic, msg, t in tqdm(rosbag.Bag(input_path).read_messages()):
+        for topic, msg, t in input_bag_messages:
             if topic == img_topic:
                 img_msg = msg       # Keep information about the image
 
@@ -346,15 +354,25 @@ def blur_ros1(model,
                     boxes = next(model(img, stream=True, verbose=False)).boxes 
                     for box in boxes:
                         boxes_list[-1].append(box.xyxy[0].tolist())
-        
+
+
+        if verbose: print("Countering the flickering")
+
         # This function adds boxes to counter flickering of the boxes, 
         # and add boxes before the prediction 
         boxes_list = fill_list(boxes_list, frame_verif_rate*2, math.ceil(math.sqrt(max(img_msg.width, img_msg.height)))*2)
 
+
+        if verbose:
+            input_bag_messages = tqdm(rosbag.Bag(input_path).read_messages())
+        else:
+            input_bag_messages = rosbag.Bag(input_path).read_messages()
+        if verbose: print("Writing the images in the output bag file")
+
         # Here we apply the blur to the images and we write it in 
         # the output bagfile
         idx_boxes = 0               # Index of the current box
-        for topic, msg, t in tqdm(rosbag.Bag(input_path).read_messages()):
+        for topic, msg, t in input_bag_messages:
             if topic == img_topic:
                 img = bridge.imgmsg_to_cv2(msg).copy()      # Extract image
 
@@ -369,9 +387,32 @@ def blur_ros1(model,
                 # Go to the next frame
                 idx_boxes += 1
 
-    if verbose: print("========= FIN =========")
+    if verbose: print("End of blurring")
 
 def save_ros1_mp4(bagfile, topic="/camera/color/image_raw"):
+    """
+    Converts a specified topic in a ROS1 bag file containing image messages
+    to an MP4 video file.
+
+    Parameters
+    ----------
+    bagfile : str
+        The file path to the ROS bag file.
+    topic : str, optional
+        The image topic within the ROS bag file to be converted into video.
+        Default is "/camera/color/image_raw".
+
+    Notes
+    -----
+    This function reads image messages from the specified topic in the ROS1
+    bag file and uses OpenCV to write these images into an MP4 video file.
+    The output video file will have the same name as the bag file but with
+    an .mp4 extension. The frame rate of the video is determined by the
+    frequency of the topic in the ROS1 bag file.
+
+    The video is encoded using the MP4V codec, and the frame size is set
+    based on the dimensions of the first image message in the topic.
+    """
     bridge = CvBridge()
     bag_data = bg.bagreader(bagfile)
 
@@ -397,7 +438,6 @@ if __name__ == "__main__":
     model = YOLO(args.yolo_model_path)
     bag_file = args.bag_file_path
 
-    # mp4_tmp_file_name = f{uuid.uuid4().hex}.mp4"
     output_file = "output.bag" if isinstance(args.output_file, type(None)) else args.output_file
     if ".bag" not in output_file: 
         output_file += ".bag"
@@ -406,13 +446,15 @@ if __name__ == "__main__":
             topic = "/camera/color/image_raw" if isinstance(args.topic, type(None)) else args.topic
             blur_ros1(model, bag_file, 
                     output_file, 
+                    img_topic=topic,
                     frame_verif_rate=5 if isinstance(args.frame_rate, type(None)) else args.frame_rate, 
-                    topic=topic,
                     black_box=args.black_box, 
                     verbose=args.verbose)
             if args.new_mp4:
+                if args.verbose: print(f"Creating {output_file}.mp4")
                 save_ros1_mp4(output_file, topic)
             if args.orig_mp4:
+                if args.verbose: print(f"Creating {bag_file}.mp4")
                 save_ros1_mp4(bag_file, topic)
 
         case 2:
